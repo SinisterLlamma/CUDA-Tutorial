@@ -6,7 +6,7 @@ This repository contains materials, explanations, and core CUDA kernels for fund
 
 ## 1. Basic Operations: Reduction and Prefix Sum
 
-### 1.1 Parallel Reduction
+### 1.1 Parallel Reduction(also known as Fold)
 
 Parallel reduction is a fundamental operation where we combine an array of elements into a single value (e.g., sum, max, min). 
 
@@ -27,8 +27,8 @@ Parallel reduction is a fundamental operation where we combine an array of eleme
 * `seq a`: Input sequence
 * `b` (return value): Output
 
-**Illustration: Fold vs. Reduction**
-![Sequential Fold vs Parallel Reduction](/home2/eshaan.sharma/.gemini/antigravity/brain/49d60555-adef-487a-b5c2-8d39b04ef46f/media__1773140173387.png)
+
+![Sequential Fold vs Parallel Reduction](images/fold.png)
 
 #### Tree-Based Approach
 In a parallel tree-based reduction, multiple threads pair up adjacent elements and combine them. In each step, the number of active threads halves, forming an inverted tree. This reduces the time complexity from $O(N)$ (sequential) to $O(\log N)$ (parallel).
@@ -115,7 +115,7 @@ This approach uses a two-phase tree execution, performing $O(N)$ operations (mat
 ```mermaid
 graph TD
     %% Up-Sweep
-    subgraph Up-Sweep (Reduction)
+    subgraph Up-Sweep Reduction
         U1[x0] --> UC1[x0]
         U2[x1] --> UOP1((+))
         U1 -.-> UOP1
@@ -123,7 +123,7 @@ graph TD
     end
     
     %% Down-Sweep
-    subgraph Down-Sweep (Scan)
+    subgraph Down-Sweep Scan
         D1[0] --> DOP1((swap))
         DOP1 --> D2[0]
         DOP1 --> D3[x0+x1]
