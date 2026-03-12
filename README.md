@@ -104,6 +104,7 @@ for (int d = 1; d < n; d *= 2) {
     __syncthreads();
 }
 ```
+![alt text](images/scan1.png)
 
 #### B. Work-Efficient Scan (Blelloch)
 This approach uses a two-phase tree execution, performing $O(N)$ operations (matching a sequential CPU approach), making it truly work-efficient.
@@ -155,7 +156,7 @@ for (int d = n / 2; d > 0; d /= 2) {
     __syncthreads();
 }
 ```
-
+![Work-Efficient Scan](images/workefficientscan.png)
 ---
 
 ## 2. Vector Operations
