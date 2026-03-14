@@ -1,5 +1,192 @@
 # Data Parallel Programming using CUDA: Case Studies
 
+---
+
+## 0. Introduction to CUDA Programming
+
+This section provides a self-contained introduction to the CUDA programming model for attendees new to GPU programming. All examples run via **PyCUDA**, so no separate compilation step is needed.
+
+---
+
+### 0.1 Why GPUs? The Parallelism Argument
+
+A modern CPU has ~8–64 powerful cores optimised for low-latency serial execution. A modern GPU has **thousands of simpler cores** designed for high-throughput data-parallel work.
+
+```
+CPU:  [Core 0] [Core 1] ... [Core 63]        ← few, fast, general-purpose
+GPU:  [SM 0] [SM 1] ... [SM 109]             ← many SMs, each with 64–128 CUDA cores
+     Each SM runs hundreds of threads simultaneously
+```
+
+**Rule of thumb:** If you can express your problem as "do the same operation on many independent pieces of data", a GPU will beat a CPU by 10×–100×.
+
+---
+
+### 0.2 The CUDA Execution Hierarchy
+
+CUDA organises threads into a three-level hierarchy:
+
+```
+Grid
+└── Block 0 │ Block 1 │ Block 2 │ ...   ← blockIdx.x / blockIdx.y / blockIdx.z
+    └── Thread 0 │ Thread 1 │ ...       ← threadIdx.x / threadIdx.y / threadIdx.z
+```
+
+| Variable | Meaning |
+|----------|---------|
+| `threadIdx.x` | Thread's position within its block |
+| `blockDim.x` | Number of threads per block |
+| `blockIdx.x` | Block's position within the grid |
+| `gridDim.x` | Number of blocks in the grid |
+
+**Global thread index (1D):**
+```cpp
+int idx = blockIdx.x * blockDim.x + threadIdx.x;
+```
+
+Blocks can be up to `1024` threads. A warp is a group of **32 threads** that execute in lockstep — this is the hardware's true unit of parallelism.
+
+---
+
+### 0.3 Kernel Syntax
+
+A CUDA kernel is a function marked `__global__` that runs on the GPU and is launched from the CPU:
+
+```cpp
+// Define the kernel (runs on GPU)
+__global__ void my_kernel(float *data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] = data[idx] * 2.0f;
+    }
+}
+
+// Launch the kernel (called from CPU)
+int block_size = 256;
+int grid_size  = (n + block_size - 1) / block_size;  // ceiling division
+my_kernel<<<grid_size, block_size>>>(d_data, n);
+```
+
+The `<<<grid, block>>>` syntax is unique to CUDA — it specifies how many blocks and threads to launch.
+
+---
+
+### 0.4 Memory Hierarchy
+
+| Memory | Scope | Speed | Size | Keyword |
+|--------|-------|-------|------|---------|
+| **Register** | Per thread | ~30 TB/s | ~255 regs/thread | (local variables) |
+| **Shared Memory** | Per block | ~10 TB/s | 48–164 KiB/SM | `__shared__` |
+| **L2 Cache** | Chip-wide | ~3 TB/s | ~40 MiB | automatic |
+| **Global Memory (DRAM)** | All threads | ~0.5–2 TB/s | GiBs | `cudaMalloc` |
+
+**The golden rule:** Keep data in registers or shared memory as long as possible. Global memory is the bottleneck for most kernels.
+
+**Host↔Device data flow:**
+```
+CPU (Host)                    GPU (Device)
+  h_A ──cudaMemcpy(H→D)──► d_A
+                               │ kernel<<<g,b>>>(d_A)
+  h_A ◄──cudaMemcpy(D→H)── d_A
+```
+
+```cpp
+float *d_A;
+cudaMalloc(&d_A, N * sizeof(float));                          // allocate on GPU
+cudaMemcpy(d_A, h_A, N*sizeof(float), cudaMemcpyHostToDevice); // copy CPU→GPU
+// ... launch kernel ...
+cudaMemcpy(h_A, d_A, N*sizeof(float), cudaMemcpyDeviceToHost); // copy GPU→CPU
+cudaFree(d_A);                                                // free GPU memory
+```
+
+---
+
+### 0.5 Hello GPU: Vector Addition
+
+The canonical first CUDA kernel — add two arrays element by element:
+
+```cpp
+__global__ void vector_add(const float *a, const float *b, float *c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = a[i] + b[i];   // one thread, one element
+    }
+}
+```
+
+Each of the `n` threads does exactly one add — no loops, no serial bottleneck.
+
+---
+
+### 0.6 Race Conditions and Atomic Operations
+
+When multiple threads read-modify-write **the same memory address**, they race:
+
+```
+Thread 0: read counter=0, compute 0+1=1, write 1
+Thread 1: read counter=0, compute 0+1=1, write 1   ← clobbers Thread 0!
+Result: counter=1 (should be 2)
+```
+
+`atomicAdd` serialises concurrent increments into a single indivisible hardware instruction:
+
+```cpp
+// Broken — threads clobber each other
+__global__ void counter_race(int *counter) {
+    int old = *counter; *counter = old + 1;  // NOT atomic!
+}
+
+// Fixed — safe for any number of concurrent threads
+__global__ void counter_atomic(int *counter) {
+    atomicAdd(counter, 1);                   // read-modify-write in one op
+}
+```
+
+> **Note:** `atomicAdd` serialises access and can be a performance bottleneck when heavily contended. Use it sparingly, or reduce first then atomicAdd once per block.
+
+---
+
+### 0.7 PyCUDA Cheat-Sheet
+
+PyCUDA lets you write CUDA kernels as strings in Python and compile them on the fly:
+
+```python
+import pycuda.autoinit               # picks GPU 0, creates context
+import pycuda.driver as cuda
+import pycuda.gpuarray as gpuarray
+from pycuda.compiler import SourceModule
+
+# Compile a kernel string
+mod = SourceModule("""
+__global__ void scale(float *a, float s, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] *= s;
+}
+""")
+scale = mod.get_function("scale")
+
+import numpy as np
+h_a = np.ones(1024, dtype=np.float32)
+d_a = gpuarray.to_gpu(h_a)          # upload to GPU
+
+scale(d_a, np.float32(2.0), np.int32(1024),
+      block=(256,1,1), grid=(4,1,1)) # launch: 4 blocks × 256 threads
+
+print(d_a.get()[:8])                 # download and inspect
+```
+
+| PyCUDA construct | C CUDA equivalent |
+|------------------|-------------------|
+| `gpuarray.to_gpu(arr)` | `cudaMalloc` + `cudaMemcpy(H→D)` |
+| `gpu_arr.get()` | `cudaMemcpy(D→H)` |
+| `SourceModule(src)` | `nvcc` compilation |
+| `mod.get_function("name")` | Kernel function pointer |
+| `kernel(args, block=, grid=)` | `kernel<<<grid,block>>>(args)` |
+
+---
+
+
+
 This repository contains materials, explanations, and core CUDA kernels for fundamental data-parallel algorithms. It is designed to serve as a resource for exploring GPU architecture and the CUDA computation model through practical case studies.
 
 ---
