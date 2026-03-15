@@ -1,15 +1,10 @@
-# Data Parallel Programming using CUDA: Case Studies
+# CUDA Programming Tutorial
 
----
+Welcome to the basic CUDA programming tutorial! This material will get you started on GPU programming using native CUDA C++.
 
 ## 0. Introduction to CUDA Programming
 
-This section provides a self-contained introduction to the CUDA programming model for attendees new to GPU programming. All examples run via **PyCUDA**, so no separate compilation step is needed.
-
----
-
 ### 0.1 Why GPUs? The Parallelism Argument
-
 A modern CPU has ~8–64 powerful cores optimised for low-latency serial execution. A modern GPU has **thousands of simpler cores** designed for high-throughput data-parallel work.
 
 ```
@@ -17,691 +12,270 @@ CPU:  [Core 0] [Core 1] ... [Core 63]        ← few, fast, general-purpose
 GPU:  [SM 0] [SM 1] ... [SM 109]             ← many SMs, each with 64–128 CUDA cores
      Each SM runs hundreds of threads simultaneously
 ```
-
 **Rule of thumb:** If you can express your problem as "do the same operation on many independent pieces of data", a GPU will beat a CPU by 10×–100×.
 
----
+### 0.2 The Nuts and Bolts of Operations
+Here are some nuts and bolts of CUDA which will be used countless times.
 
-### 0.2 The CUDA Execution Hierarchy
+#### Kernel
+A kernel is a special function that runs on your GPU (Graphics Card) instead of your CPU. Think of it like giving instructions to a large team of workers (GPU threads) who can all work at the same time. You mark a kernel with the `__global__` keyword, and it can only return `void`. Example:
 
-CUDA organises threads into a three-level hierarchy:
+```cpp
+__global__ void addNumbers(int *a, int *b, int *result) {
+    *result = *a + *b;
+}
+```
+
+#### The CUDA Execution Hierarchy
+CUDA organises threads into a three-level hierarchy. This makes managing thousands of threads conceptually easy!
 
 ```
 Grid
-└── Block 0 │ Block 1 │ Block 2 │ ...   ← blockIdx.x / blockIdx.y / blockIdx.z
-    └── Thread 0 │ Thread 1 │ ...       ← threadIdx.x / threadIdx.y / threadIdx.z
+└── Block 0 │ Block 1 │ Block 2 │ ...
+    └── Thread 0 │ Thread 1 │ ...
 ```
+
+1. **Grid**: The entire set of threads launched for a single kernel invocation. Think of it as the overall execution space, organized as a 1D, 2D, or 3D collection of blocks.
+2. **Block**: A group of threads that can cooperate and share data quickly through fast shared memory. Blocks can be 1D, 2D, or 3D. Threads within a block can share memory and synchronize with each other.
+3. **Thread**: The smallest unit of execution. Each thread executes the kernel code independently and has its own unique ID to know which piece of data to work on.
+
+#### Thread Indexing
+Each thread has a unique identifier used to determine its position.
 
 | Variable | Meaning |
 |----------|---------|
-| `threadIdx.x` | Thread's position within its block |
-| `blockDim.x` | Number of threads per block |
-| `blockIdx.x` | Block's position within the grid |
-| `gridDim.x` | Number of blocks in the grid |
+| `threadIdx` | A 3-component vector (`.x`, `.y`, `.z`) giving thread's position within its block. |
+| `blockDim` | A 3-component vector specifying dimensions of the block. |
+| `blockIdx` | A 3-component vector giving the block's position within the grid. |
+| `gridDim` | A 3-component vector specifying the dimensions of the grid. |
 
-**Global thread index (1D):**
+**Calculating Global Thread ID:**
+To compute a unique global thread ID (e.g., for accessing a 1D array linearly), we use:
 ```cpp
-int idx = blockIdx.x * blockDim.x + threadIdx.x;
+// blockIdx.x * blockDim.x gives the starting index of the current block
+// threadIdx.x gives the thread's local position within the block
+int globalThreadId = blockIdx.x * blockDim.x + threadIdx.x; 
 ```
 
-Blocks can be up to `1024` threads. A warp is a group of **32 threads** that execute in lockstep — this is the hardware's true unit of parallelism.
+#### Helper Types and Launch Configuration
+**`dim3`**
+A simple way to specify 3D dimensions for grid and block sizes.
+```cpp
+dim3 blockSize(16, 16, 1);  // 16x16x1 threads per block
+dim3 gridSize(8, 8, 1);     // 8x8x1 blocks in grid
+```
 
----
+**`<<<gridSize, blockSize>>>`**
+Special syntax used to configure and launch kernels from the CPU (Host) onto the GPU (Device).
+```cpp
+// Kernel launch
+myKernel<<<gridSize, blockSize>>>(a, b, result);
+```
 
-### 0.3 Kernel Syntax
+### 0.3 Memory Management API
+To manage arrays on the GPU, CUDA provides analogues to standard C memory tools:
 
-A CUDA kernel is a function marked `__global__` that runs on the GPU and is launched from the CPU:
+- **`cudaMalloc`**: Allocates memory on the GPU. (Similar to `malloc`).
+- **`cudaMemcpy`**: Copies memory. It handles:
+  - `cudaMemcpyHostToDevice` (Copy from CPU array to GPU array)
+  - `cudaMemcpyDeviceToHost` (Copy from GPU array back to CPU)
+  - `cudaMemcpyDeviceToDevice` (Directly copy between GPU locations)
+- **`cudaFree`**: Frees memory on the GPU.
+- **`cudaDeviceSynchronize()`**: By default, CPU and GPU work asynchronously to overlap work. This command forces the CPU to stop and wait until all GPU operations are fully complete before continuing.
+
+### 0.4 The Memory Hierarchy
+CUDA provides several types of memory, each with crucially different behavior and speeds:
+
+| Memory | Scope | Speed | Size | Keyword | Description |
+|--------|-------|-------|------|---------|-------------|
+| **Register** | Per thread | ~30 TB/s | ~255 per thread | local variables | private, ultra-fast chip memory for things like loop counters. |
+| **Shared Memory** | Per block | ~10 TB/s | 48–164 KiB/SM | `__shared__` | Fast cache-like memory blocks can use to cooperate and share data. |
+| **L2 Cache** | Chip-wide | ~3 TB/s | ~40 MiB | automatic | Hardware cache for global memory. |
+| **Global Memory** | All threads | ~1.5 TB/s | GiBs | `cudaMalloc` | Slowest but largest. The main RAM of the graphics card. |
+| **Constant Memory** | All threads | Fast (cached) | ~64 KiB | `__constant__` | Read-only. Great for broadcast parameters that don't change. |
+| **Local Memory** | Per thread | Slow (Global) | N/A | spilled | Spilled off-chip variables when registers run out. Avoid if possible! |
+
+**The golden rule:** Keep data in registers or shared memory as long as possible. Continually reading and writing to Global memory is the bottleneck for most kernels.
+
+### 0.5 Putting It All Together
+A simple array addition example bringing kernel definition, indexing, memory macros, and launching together:
 
 ```cpp
-// Define the kernel (runs on GPU)
-__global__ void my_kernel(float *data, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        data[idx] = data[idx] * 2.0f;
+// 1. Definition (runs on GPU)
+__global__ void addArrays(int *a, int *b, int *c, int size) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < size) {
+        c[index] = a[index] + b[index];
     }
 }
 
-// Launch the kernel (called from CPU)
-int block_size = 256;
-int grid_size  = (n + block_size - 1) / block_size;  // ceiling division
-my_kernel<<<grid_size, block_size>>>(d_data, n);
-```
-
-The `<<<grid, block>>>` syntax is unique to CUDA — it specifies how many blocks and threads to launch.
-
----
-
-### 0.4 Memory Hierarchy
-
-| Memory | Scope | Speed | Size | Keyword |
-|--------|-------|-------|------|---------|
-| **Register** | Per thread | ~30 TB/s | ~255 regs/thread | (local variables) |
-| **Shared Memory** | Per block | ~10 TB/s | 48–164 KiB/SM | `__shared__` |
-| **L2 Cache** | Chip-wide | ~3 TB/s | ~40 MiB | automatic |
-| **Global Memory (DRAM)** | All threads | ~0.5–2 TB/s | GiBs | `cudaMalloc` |
-
-**The golden rule:** Keep data in registers or shared memory as long as possible. Global memory is the bottleneck for most kernels.
-
-**Host↔Device data flow:**
-```
-CPU (Host)                    GPU (Device)
-  h_A ──cudaMemcpy(H→D)──► d_A
-                               │ kernel<<<g,b>>>(d_A)
-  h_A ◄──cudaMemcpy(D→H)── d_A
-```
-
-```cpp
-float *d_A;
-cudaMalloc(&d_A, N * sizeof(float));                          // allocate on GPU
-cudaMemcpy(d_A, h_A, N*sizeof(float), cudaMemcpyHostToDevice); // copy CPU→GPU
-// ... launch kernel ...
-cudaMemcpy(h_A, d_A, N*sizeof(float), cudaMemcpyDeviceToHost); // copy GPU→CPU
-cudaFree(d_A);                                                // free GPU memory
-```
-
----
-
-### 0.5 Hello GPU: Vector Addition
-
-The canonical first CUDA kernel — add two arrays element by element:
-
-```cpp
-__global__ void vector_add(const float *a, const float *b, float *c, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        c[i] = a[i] + b[i];   // one thread, one element
-    }
-}
-```
-
-Each of the `n` threads does exactly one add — no loops, no serial bottleneck.
-
----
-
-### 0.6 Race Conditions and Atomic Operations
-
-When multiple threads read-modify-write **the same memory address**, they race:
-
-```
-Thread 0: read counter=0, compute 0+1=1, write 1
-Thread 1: read counter=0, compute 0+1=1, write 1   ← clobbers Thread 0!
-Result: counter=1 (should be 2)
-```
-
-`atomicAdd` serialises concurrent increments into a single indivisible hardware instruction:
-
-```cpp
-// Broken — threads clobber each other
-__global__ void counter_race(int *counter) {
-    int old = *counter; *counter = old + 1;  // NOT atomic!
-}
-
-// Fixed — safe for any number of concurrent threads
-__global__ void counter_atomic(int *counter) {
-    atomicAdd(counter, 1);                   // read-modify-write in one op
-}
-```
-
-> **Note:** `atomicAdd` serialises access and can be a performance bottleneck when heavily contended. Use it sparingly, or reduce first then atomicAdd once per block.
-
----
-
-### 0.7 PyCUDA Cheat-Sheet
-
-PyCUDA lets you write CUDA kernels as strings in Python and compile them on the fly:
-
-```python
-import pycuda.autoinit               # picks GPU 0, creates context
-import pycuda.driver as cuda
-import pycuda.gpuarray as gpuarray
-from pycuda.compiler import SourceModule
-
-# Compile a kernel string
-mod = SourceModule("""
-__global__ void scale(float *a, float s, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) a[i] *= s;
-}
-""")
-scale = mod.get_function("scale")
-
-import numpy as np
-h_a = np.ones(1024, dtype=np.float32)
-d_a = gpuarray.to_gpu(h_a)          # upload to GPU
-
-scale(d_a, np.float32(2.0), np.int32(1024),
-      block=(256,1,1), grid=(4,1,1)) # launch: 4 blocks × 256 threads
-
-print(d_a.get()[:8])                 # download and inspect
-```
-
-| PyCUDA construct | C CUDA equivalent |
-|------------------|-------------------|
-| `gpuarray.to_gpu(arr)` | `cudaMalloc` + `cudaMemcpy(H→D)` |
-| `gpu_arr.get()` | `cudaMemcpy(D→H)` |
-| `SourceModule(src)` | `nvcc` compilation |
-| `mod.get_function("name")` | Kernel function pointer |
-| `kernel(args, block=, grid=)` | `kernel<<<grid,block>>>(args)` |
-
----
-
-
-
-This repository contains materials, explanations, and core CUDA kernels for fundamental data-parallel algorithms. It is designed to serve as a resource for exploring GPU architecture and the CUDA computation model through practical case studies.
-
----
-
-## 1. Basic Operations: Reduction and Prefix Sum
-
-### 1.1 Parallel Reduction(also known as Fold)
-
-Parallel reduction is a fundamental operation where we combine an array of elements into a single value (e.g., sum, max, min). 
-
-
-
- **Apply binary operation f to each element and an accumulated value**
-
-* **Seeded by initial value of type b**
-
-`f :: (b,a) -> b`
-
-`fold :: b -> ((b,a) -> b) -> seq a -> b`
-
-**Annotations for the `fold` signature:**
-
-* `b` (first argument): Initial element
-* `((b,a) -> b)`: Function to fold
-* `seq a`: Input sequence
-* `b` (return value): Output
-
-
-![Sequential Fold vs Parallel Reduction](images/fold.png)
-
-#### Tree-Based Approach
-In a parallel tree-based reduction, multiple threads pair up adjacent elements and combine them. In each step, the number of active threads halves, forming an inverted tree. This reduces the time complexity from $O(N)$ (sequential) to $O(\log N)$ (parallel).
-
-```mermaid
-graph TD
-    A1[x0] --> C1((+))
-    A2[x1] --> C1
-    A3[x2] --> C2((+))
-    A4[x3] --> C2
-    A5[x4] --> C3((+))
-    A6[x5] --> C3
-    A7[x6] --> C4((+))
-    A8[x7] --> C4
+// 2. Launch (called from CPU)
+int main() {
+    int size = 10000;
     
-    C1 --> D1((+))
-    C2 --> D1
-    C3 --> D2((+))
-    C4 --> D2
+    // ... Assume cudaMalloc and cudaMemcpy have happened here ...
     
-    D1 --> E1((+))
-    D2 --> E1
+    int threadsPerBlock = 256;
+    // Calculate needed blocks (ceiling division)
+    int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;  
     
-    E1 --> F((Final Sum))
-
-    classDef op fill:#ffcc00,stroke:#333,stroke-width:2px;
-    class C1,C2,C3,C4,D1,D2,E1 op;
-```
-
-#### CUDA Core Loop (Pseudocode)
-
-```cpp
-// Kernel Core Loop for Shared Memory Reduction
-for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-        shared_data[tid] += shared_data[tid + s];
-    }
-    __syncthreads(); // Ensure all additions in this step are complete
-}
-// Thread 0 writes the block's partial sum to global memory
-if (tid == 0) out[blockIdx.x] = shared_data[0];
-```
-
----
-
-### 1.2 Parallel Prefix Sum (Scan)
-
-A prefix sum (or scan) takes an input array and produces an output array where each element is the sum of all preceding elements.
-
-#### A. Naive / Step-Efficient Scan (Hillis-Steele)
-This approach is highly parallel and easy to understand but **not work-efficient**. It performs $O(N \log N)$ operations compared to a sequential CPU's $O(N)$.
-
-**Illustration:**
-At step $d$, each thread $i$ adds the element at $i - 2^{(d-1)}$ to its own element.
-
-```text
-Step 0: [ 1 ]  [ 2 ]  [ 3 ]  [ 4 ]
-Step 1: [ 1 ]  [1+2]  [2+3]  [3+4]  (distance 1)
-Step 2: [ 1 ]  [ 3 ]  [1+5]  [3+7]  (distance 2)
---------------------------------------
-Result: [ 1 ]  [ 3 ]  [ 6 ]  [ 10]
-```
-
-**CUDA Core Loop (Hillis-Steele):**
-```cpp
-for (int d = 1; d < n; d *= 2) {
-    int val = 0;
-    if (tid >= d) {
-        val = shared_data[tid - d];
-    }
-    __syncthreads();
-    shared_data[tid] += val;
-    __syncthreads();
-}
-```
-![alt text](images/scan1.png)
-
-#### B. Work-Efficient Scan (Blelloch)
-This approach uses a two-phase tree execution, performing $O(N)$ operations (matching a sequential CPU approach), making it truly work-efficient.
-
-**Illustration:**
-1. **Up-Sweep (Reduce Phase):** Builds a partial sum tree.
-2. **Down-Sweep Phase:** Replaces the root with 0 and traverses back down, swapping and adding to compute running sums.
-
-```mermaid
-graph TD
-    %% Up-Sweep
-    subgraph Up-Sweep Reduction
-        U1[x0] --> UC1[x0]
-        U2[x1] --> UOP1((+))
-        U1 -.-> UOP1
-        UOP1 --> UC2[x0+x1]
-    end
+    addArrays<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_c, size);
     
-    %% Down-Sweep
-    subgraph Down-Sweep Scan
-        D1[0] --> DOP1((swap))
-        DOP1 --> D2[0]
-        DOP1 --> D3[x0+x1]
-    end
-```
-
-**CUDA Core Loop (Blelloch):**
-```cpp
-// 1. Up-sweep (Reduce) phase
-for (int d = 1; d < n; d *= 2) {
-    int index = (tid + 1) * d * 2 - 1;
-    if (index < n) {
-        shared_data[index] += shared_data[index - d];
-    }
-    __syncthreads();
+    cudaDeviceSynchronize(); // Wait for finish
+    
+    return 0;
 }
-
-if (tid == 0) shared_data[n - 1] = 0; // Set root to zero
-__syncthreads();
-
-// 2. Down-sweep phase
-for (int d = n / 2; d > 0; d /= 2) {
-    int index = (tid + 1) * d * 2 - 1;
-    if (index < n) {
-        float temp = shared_data[index - d];
-        shared_data[index - d] = shared_data[index];
-        shared_data[index] += temp;
-    }
-    __syncthreads();
-}
-```
-![Work-Efficient Scan](images/workefficientscan.png)
----
-
-## 2. Vector Operations
-
-### 2.1 Vector Dot Product
-
-The dot product of two vectors involves element-wise multiplication followed by a reduction (summation) of the products.
-
-**CUDA Core Loop (Dot Product):**
-```cpp
-// 1. Element-wise multiplication into shared memory
-int idx = blockIdx.x * blockDim.x + threadIdx.x;
-if (idx < N) {
-    shared_data[tid] = A[idx] * B[idx];
-} else {
-    shared_data[tid] = 0.0f; // Handle boundaries
-}
-__syncthreads();
-
-// 2. Tree-based Parallel Reduction (same as above)
-for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (tid < s) shared_data[tid] += shared_data[tid + s];
-    __syncthreads();
-}
-
-// 3. Atomically add block results to a global accumulator
-if (tid == 0) atomicAdd(final_result, shared_data[0]);
 ```
 
 ---
+## 1. Prerequisites & Resources
+Before diving into code, here are basic pointers to NVIDIA documentation:
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html)
+- [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)
 
-## 3. Matrix Operations
-
-### 3.1 Matrix-Vector Product
-
-Multiply a matrix $\mathbf{A}$ (dimensions $M \times N$) by a vector $\mathbf{x}$ (dimension $N$) to yield a vector $\mathbf{y}$ (dimension $M$).
-
-**Illustration:**
-```text
-       Matrix A         Vector x     Vector y
-[ a00, a01, a02 ]   *   [ x0 ]   =   [ y0 ]
-[ a10, a11, a12 ]       [ x1 ]       [ y1 ]
-[ a20, a21, a22 ]       [ x2 ]       [ y2 ]
+Compile the tutorial examples by running:
+```bash
+make
 ```
 
----
-
-#### V1 — Naive: One Thread Per Row
-
-Each thread independently computes the full dot product for one row, reading all of `A` and `x` from global memory.
-
-```cpp
-int row = blockIdx.x * blockDim.x + threadIdx.x;
-if (row < M) {
-    float dot = 0.0f;
-    for (int col = 0; col < N; ++col) {
-        dot += A[row * N + col] * x[col];
-    }
-    y[row] = dot;
-}
+## 2. Hello World: `hello_cuda.cu`
+Start by reviewing and running `hello_cuda.cu`:
+```bash
+./hello_cuda
 ```
 
-**Bottleneck:** Every thread independently loads the full vector `x` from slow global memory — `x` is read $M$ times in total. For large $M$ and $N$, this is extremely bandwidth-wasteful.
+**Concepts Covered:**
+- **Host vs Device:** `h_a` (host) vs `d_a` (device).
+- **Memory Allocation:** `cudaMalloc` and `cudaMemcpy`.
+- **Kernel Definition:** The `__global__` keyword.
+- **Grids & Blocks:** Launching `vector_add<<<grid_size, block_size>>>(...)`.
 
----
+## 3. Parallel Reduction: `parallel_reduction.cu`
+Reductions (like sum, min, max) are fundamental parallel patterns.
 
-#### V2 — Cache `x` in Shared Memory (Tiled)
-
-All threads in a block collaborate to load a tile of `x` into shared memory once, then reuse it for all rows in the block. `x` is now read once per block per tile instead of once per thread.
-
-```cpp
-__shared__ float x_shared[TILE_SIZE];
-
-int row = blockIdx.x * blockDim.x + threadIdx.x;
-float dot = 0.0f;
-
-// Process x in tiles
-for (int t = 0; t < (N + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-
-    // Collaboratively load one tile of x into shared memory
-    int x_idx = t * TILE_SIZE + threadIdx.x;
-    x_shared[threadIdx.x] = (x_idx < N) ? x[x_idx] : 0.0f;
-    __syncthreads();
-
-    // Each thread accumulates using the cached tile
-    if (row < M) {
-        for (int col = 0; col < TILE_SIZE; ++col) {
-            int global_col = t * TILE_SIZE + col;
-            if (global_col < N)
-                dot += A[row * N + global_col] * x_shared[col];
-        }
-    }
-    __syncthreads();
-}
-
-if (row < M) y[row] = dot;
+Run the example:
+```bash
+./parallel_reduction
 ```
 
-**Improvement:** `x` is loaded from global memory only once per block per tile (not once per thread). Global memory traffic for `x` is reduced by a factor of `blockDim.x`.
+**Concepts Covered:**
+- **Naive Algorithm:** Threads in a block compute their assigned partial sum efficiently, but thread 0 sequentially adds everything in the block.
+- **Efficient Algorithm:** The "Tree" reduction. Threads drop off by half at each step: `sdata[tid] += sdata[tid + s]`. This yields O(log N) depth complexity per block.
+- **Shared Memory:** `__shared__` memory is much faster than global memory and allows threads *within the same block* to cooperate.
+- **Synchronization:** `__syncthreads()` prevents race conditions by ensuring all threads reach the same point before proceeding.
 
-**Remaining bottleneck:** Each thread still loads its row of `A` alone. For very wide matrices (large $N$), the dot product could be parallelised across threads too.
 
----
 
-#### V3 — 2D Parallelism: Threads Collaborate on Each Row's Dot Product
+## 4. 2D Grids & Blocks: `image_blur.cu`
+GPUs excel at 2D problems like images and matrices. 
 
-Use a 2D thread block: threads along the x-dimension split the columns of a row and compute partial sums in parallel, which are then reduced in shared memory. One block handles one row.
-
-```cpp
-// Launch config: <<<M, BLOCK_COLS>>>  (one block per row, BLOCK_COLS threads per block)
-__shared__ float partial[BLOCK_COLS];
-
-int row = blockIdx.x;
-int tid = threadIdx.x;
-
-// Each thread strides across columns, accumulating a partial sum
-float sum = 0.0f;
-for (int col = tid; col < N; col += BLOCK_COLS) {
-    sum += A[row * N + col] * x[col];
-}
-partial[tid] = sum;
-__syncthreads();
-
-// Tree-based reduction within the block to get the final dot product
-for (unsigned int s = BLOCK_COLS / 2; s > 0; s >>= 1) {
-    if (tid < s) partial[tid] += partial[tid + s];
-    __syncthreads();
-}
-
-// Thread 0 writes the final result
-if (tid == 0) y[row] = partial[0];
+Run the example:
+```bash
+./image_blur
 ```
 
-**Improvement:** The dot product for each row is now computed in parallel by `BLOCK_COLS` threads, reducing per-row latency from $O(N)$ to $O(N / \text{BLOCK\_COLS})$ compute steps plus $O(\log \text{BLOCK\_COLS})$ for the reduction. This is the standard high-performance approach for matrix-vector products on wide matrices.
+**Concepts Covered:**
+- **Images as 1D Arrays:** We map 2D coordinates `(row, col)` to a 1D index `row * width + col`.
+- **2D Indexing:** 
+  ```cpp
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  ```
 
-**Summary of progression:**
+## 5. Matrix Multiplication Optimizations: `matrix_mul_demo.cu`
+## 5. Matrix Multiplication Optimizations: `matrix_mul_demo.cu`
 
-| Version | x loaded from global memory | Parallelism |
-|---|---|---|
-| V1 Naive | $M \times$ (once per thread) | 1 thread per row |
-| V2 Tiled x | Once per block per tile | 1 thread per row |
-| V3 2D parallel | Once per block per tile | All threads per row |
+Matrix multiplication is heavily memory-bound and compute-intensive. This demo walks through 5 iterations of optimizing a standard Matrix Multiplication kernel (SGEMM) to show how leveraging CUDA memory hierarchies speeds up execution drastically.
 
----
-
-### 3.2 Matrix-Matrix Product
-
-
-## CUDA Matrix-Matrix Multiplication (SGEMM) Optimization
-
-Matrix multiplication is heavily memory-bound and compute-intensive. This section breaks down the iterative optimization of a Single-Precision Matrix Multiplication (SGEMM) kernel in CUDA, stepping from a basic implementation towards cuBLAS-like performance by leveraging memory hierarchies, caching, and arithmetic intensity.
+Run the example:
+```bash
+./matrix_mul_demo
+```
 
 ### Kernel 1: Naive Implementation
+1 thread computes 1 element, reading directly from Global Memory. Threads within the same warp read non-contiguous elements of matrix A. This lack of spatial locality causes many tiny, separate memory transactions, severely choking global memory bandwidth.
 
-In the standard CUDA hierarchy, we assign each thread in a 2D block to compute exactly *one* element of the output matrix $C$. The thread loops over the corresponding row of $A$ and column of $B$, computing the dot product and writing the result.
+![Visualization of Naive Memory Access Pattern](images/naiveK1.png)
+![Memory Access Pattern](images/memaccessK1.png)
 
-* **The Bottleneck:** Threads within the same warp (32 consecutive threads) read contiguous elements of $B$, but they read non-contiguous elements of $A$. This lack of spatial locality causes the GPU to issue many tiny, separate memory transactions, severely choking global memory (GMEM) bandwidth.
-![* `\[Placeholder for Image: Visualization of Naive Memory Access Pattern mapping threads to Matrix A and B\]`](images/naiveK1.png)
-
-
-
-```cpp
-// Kernel 1: Naive 1 thread = 1 element
-int x = blockIdx.x * blockDim.x + threadIdx.x; // Row index
-int y = blockIdx.y * blockDim.y + threadIdx.y; // Col index
-
-if (x < M && y < N) {
-    float tmp = 0.0;
-    for (int i = 0; i < K; ++i) {
-        // Uncoalesced access on A for adjacent threads in a warp
-        tmp += A[x * K + i] * B[i * N + y]; 
-    }
-    C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-}
-
-```
-#### Memory Access Pattern:
-![alt text](images/memaccessK1.png)
 ### Kernel 2: Global Memory Coalescing
+To maximize global memory throughput, we re-map thread IDs to ensure consecutive threads in a warp access continuous memory blocks in *both* A and B. The hardware can now group the memory loads (coalesced accesses).
 
-To maximize global memory throughput, memory accesses by threads in the same warp must be **coalesced** (combined into a single, wide 128-byte transaction).
-
-* **The Optimization:** We change the index mapping. We assign threads to the output matrix $C$ such that adjacent threads in a warp access continuous memory blocks in *both* $A$ and $B$.
-* **The Result:** The hardware can now group the memory loads. This drastically reduces the total number of memory transactions, though the kernel is still fundamentally bottlenecked by the sheer volume of GMEM reads.
-* ![`\[Placeholder for Image: Visualization of Coalesced vs. Non-Coalesced Global Memory Accesses in a Warp\]`](images/k2.png)
-
-```cpp
-// Kernel 2: Remapping thread IDs to ensure memory coalescing
-// threadIdx.x is contiguous, so we map it to the contiguous dimension
-const int x = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
-const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
-
-if (x < M && y < N) {
-    float tmp = 0.0;
-    for (int i = 0; i < K; ++i) {
-        // Access pattern is now coalesced for both A and B
-        tmp += A[x * K + i] * B[i * N + y];
-    }
-    C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-}
-
-```
+![Coalesced vs. Non-Coalesced Accesses](images/k2.png)
 
 ### Kernel 3: Shared Memory (SMEM) Caching
+Even with coalescent accesses, fetching from global memory for every math operation is too slow. We utilize Shared Memory (SMEM)—a very fast, on-chip cache. We load small "tiles" (e.g., 32x32 blocks) of A and B from GMEM into SMEM, sync threads, compute partial dot products, and slide to the next tile.
 
-Even with coalesced accesses, fetching from global memory for every math operation is far too slow. We need to reuse data.
+![Block Tiling and Shared Memory Caching stages](images/kernel3.png)
+![Roofline Model](images/rooflinek3.png)
 
-* **The Optimization:** We utilize Shared Memory (SMEM)—a very fast, user-managed, on-chip cache shared by all threads in a block. We load small "tiles" (e.g., 32x32 blocks) of $A$ and $B$ from GMEM into SMEM. Threads synchronize (`__syncthreads()`) to ensure the tile is fully loaded, compute their partial dot products using the SMEM tile, and then slide to the next tile.
-* **The Result:** We dramatically reduce redundant global memory accesses. The bottleneck now shifts from Global Memory bandwidth to Shared Memory bandwidth.
-* ![`\[Placeholder for Image: Visualization of Block Tiling and Shared Memory Caching stages\]`](images/kernel3.png)
-
-```cpp
-// Kernel 3: SMEM Caching (Tiling)
-__shared__ float As[BLOCKSIZE * BLOCKSIZE];
-__shared__ float Bs[BLOCKSIZE * BLOCKSIZE];
-
-const int threadRow = threadIdx.x / BLOCKSIZE;
-const int threadCol = threadIdx.x % BLOCKSIZE;
-
-// advance pointers to the starting positions
-A += cRow * BLOCKSIZE * K;                          // row=cRow, col=0
-B += cCol * BLOCKSIZE;                              // row=0, col=cCol
-C += cRow * BLOCKSIZE * N + cCol * BLOCKSIZE;       // row=cRow, col=cCol
-
-float tmp = 0.0;
-// the outer loop advances A along the columns and B along
-// the rows until we have fully calculated the result in C.
-for (int bkIdx = 0; bkIdx < K; bkIdx += BLOCKSIZE) {
-    // Have each thread load one of the elements in A & B from
-    // global memory into shared memory.
-    // Make the threadCol (=threadIdx.x) the consecutive index
-    // to allow global memory access coalescing
-    As[threadRow * BLOCKSIZE + threadCol] = A[threadRow * K + threadCol];
-    Bs[threadRow * BLOCKSIZE + threadCol] = B[threadRow * N + threadCol];
-
-    // block threads in this block until cache is fully populated
-    __syncthreads();
-
-    // advance pointers onto next chunk
-    A += BLOCKSIZE;
-    B += BLOCKSIZE * N;
-
-    // execute the dot product on the currently cached block
-    for (int dotIdx = 0; dotIdx < BLOCKSIZE; ++dotIdx) {
-        tmp += As[threadRow * BLOCKSIZE + dotIdx] *
-               Bs[dotIdx * BLOCKSIZE + threadCol];
-    }
-    // need to sync again at the end, to avoid faster threads
-    // fetching the next block into the cache before slower threads are done
-    __syncthreads();
-}
-C[threadRow * N + threadCol] =
-    alpha * tmp + beta * C[threadRow * N + threadCol];
-```
-![alt text](images/rooflinek3.png)
 ### Kernel 4: 1D Blocktiling (Multiple Results per Thread)
+To reduce the strain on Shared Memory, we handle more work in thread-local registers. Instead of computing a single element of C, each thread calculates a 1D column (e.g., 8 elements). It caches a value of B in a register and reuses it across 8 distinct calculations with A.
 
-To reduce the strain on Shared Memory, we must handle more work in the fastest memory space available: thread-local registers.
-
-* **The Optimization:** Instead of computing a single element of $C$, each thread calculates a 1D column (or row) of multiple elements (e.g., 8 elements). A thread can now load a single value of $B$ from SMEM, cache it in a local register, and reuse it across 8 distinct calculations with $A$.
-* **The Result:** SMEM loads are slashed significantly, making the kernel roughly twice as fast as Kernel 3.
-* ![alt text](images/kernell4.png)
-
-```cpp
-// Launch config: sgemm_1d_blocktile<<<grid, BM/TM * BN>>>(...)  where
-//   dim3 grid((M + BM-1)/BM, (N + BN-1)/BN)
-__global__ void sgemm_1d_blocktile(float *A, float *B, float *C,
-                                    int M, int N, int K,
-                                    float alpha, float beta) {
-    __shared__ float As[BM * BK];
-    __shared__ float Bs[BK * BN];
-
-    // Each thread handles TM rows within its column
-    const uint threadCol = threadIdx.x % BN;
-    const uint threadRow = threadIdx.x / BN;
-
-    // Indices used to load tiles from GMEM into SMEM
-    const uint innerRowA = threadIdx.x / BK;
-    const uint innerColA = threadIdx.x % BK;
-    const uint innerRowB = threadIdx.x / BN;
-    const uint innerColB = threadIdx.x % BN;
-
-    // Advance pointers to this block's starting tile
-    A += blockIdx.y * BM * K;
-    B += blockIdx.x * BN;
-    C += blockIdx.y * BM * N + blockIdx.x * BN;
-
-    float threadResults[TM] = {0.0}; // Stored in ultra-fast registers
-
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        // Collaboratively load tiles of A and B into SMEM
-        As[innerRowA * BK + innerColA] = A[innerRowA * K + innerColA];
-        Bs[innerRowB * BN + innerColB] = B[innerRowB * N + innerColB];
-        __syncthreads();
-
-        // Advance pointers to next tile
-        A += BK;
-        B += BK * N;
-
-        // Compute TM results per thread
-        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
-            float Btmp = Bs[dotIdx * BN + threadCol]; // Cache B value in a register for reuse
-            for (uint resIdx = 0; resIdx < TM; ++resIdx) {
-                // Reuse Btmp TM times against different rows of A
-                threadResults[resIdx] += As[(threadRow * TM + resIdx) * BK + dotIdx] * Btmp;
-            }
-        }
-        __syncthreads();
-    }
-
-    // Write TM results back to global memory
-    for (uint resIdx = 0; resIdx < TM; ++resIdx) {
-        C[(threadRow * TM + resIdx) * N + threadCol] =
-            alpha * threadResults[resIdx] +
-            beta  * C[(threadRow * TM + resIdx) * N + threadCol];
-    }
-}
-```
+![1D Block Tiling](images/kernell4.png)
 
 ### Kernel 5: 2D Blocktiling (Increasing Arithmetic Intensity)
+Each thread is now responsible for a 2D grid of elements (e.g., an 8x8 sub-grid of C). The thread loads 8 elements of A and 8 elements of B into registers. By performing an outer product on these registers, it computes 64 results. The kernel transitions from being memory-bound to being completely **compute-bound**!
 
-We can push register reuse even further by calculating a 2D grid instead of a 1D line.
+![2D Thread Tiling outer product](images/kernel5.png)
+**Concepts Covered in this Demo:**
 
-* **The Optimization:** Each thread is now responsible for a 2D grid of elements (e.g., an 8x8 sub-grid of $C$). The thread loads 8 elements of $A$ and 8 elements of $B$ into its registers. By performing an outer product on these registers, it can compute 64 results.
-* **The Result:** The arithmetic intensity (ratio of FLOPs to memory loads) skyrockets. We are finally moving the kernel from being memory-bound to being compute-bound.
-![* `\[Placeholder for Image: Visualization of 2D Thread Tiling showing the outer product calculation in registers\]`](images/kernel5.png)
+### Kernel 1: Naive Implementation
+1 thread computes 1 element, reading directly from Global Memory. Threads within the same warp read non-contiguous elements of matrix A. This lack of spatial locality causes many tiny, separate memory transactions, severely choking global memory bandwidth.
 
+![Visualization of Naive Memory Access Pattern](images/naiveK1.png)
+![Memory Access Pattern](images/memaccessK1.png)
+
+### Kernel 2: Global Memory Coalescing
+To maximize global memory throughput, we re-map thread IDs to ensure consecutive threads in a warp access continuous memory blocks in *both* A and B. The hardware can now group the memory loads (coalesced accesses).
+
+![Coalesced vs. Non-Coalesced Accesses](images/k2.png)
+
+### Kernel 3: Shared Memory (SMEM) Caching
+Even with coalescent accesses, fetching from global memory for every math operation is too slow. We utilize Shared Memory (SMEM)—a very fast, on-chip cache. We load small "tiles" (e.g., 32x32 blocks) of A and B from GMEM into SMEM, sync threads, compute partial dot products, and slide to the next tile.
+
+![Block Tiling and Shared Memory Caching stages](images/kernel3.png)
+![Roofline Model](images/rooflinek3.png)
+
+### Kernel 4: 1D Blocktiling (Multiple Results per Thread)
+To reduce the strain on Shared Memory, we handle more work in thread-local registers. Instead of computing a single element of C, each thread calculates a 1D column (e.g., 8 elements). It caches a value of B in a register and reuses it across 8 distinct calculations with A.
+
+![1D Block Tiling](images/kernell4.png)
+
+### Kernel 5: 2D Blocktiling (Increasing Arithmetic Intensity)
+Each thread is now responsible for a 2D grid of elements (e.g., an 8x8 sub-grid of C). The thread loads 8 elements of A and 8 elements of B into registers. By performing an outer product on these registers, it computes 64 results. The kernel transitions from being memory-bound to being completely **compute-bound**!
+
+![2D Thread Tiling outer product](images/kernel5.png)
+
+## 6. Measuring Kernel Time
+You will notice we use `cudaEvent_t` in all examples.
+
+**Why not use C++ `std::chrono` directly?**
+Kernel launches are *asynchronous*. If you start a CPU timer, launch a kernel, and stop the timer, that simply measures how long the CPU took to *schedule* the kernel, not run it.
+
+**Proper Timing Pattern:**
 ```cpp
-// Kernel 5: 2D Blocktiling (e.g., TM = 8, TN = 8)
-float threadResults[TM * TN] = {0.0}; 
-float regM[TM] = {0.0}; // Register cache for A
-float regN[TN] = {0.0}; // Register cache for B
+cudaEvent_t start, stop;
+cudaEventCreate(&start); cudaEventCreate(&stop);
 
-for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-    // ... Populate SMEM tiles As and Bs ...
-    __syncthreads();
+cudaEventRecord(start);
+my_kernel<<<...>>>(...);
+cudaEventRecord(stop);
 
-    for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
-        // Load chunks from SMEM directly into Registers
-        for (uint i = 0; i < TM; ++i) regM[i] = As[...];
-        for (uint i = 0; i < TN; ++i) regN[i] = Bs[...];
-        
-        // Perform Outer Product strictly in registers
-        for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
-            for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
-                threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
-            }
-        }
-    }
-    __syncthreads();
-}
-
+cudaEventSynchronize(stop); // CRITICAL: Wait for GPU to finish
+float ms = 0;
+cudaEventElapsedTime(&ms, start, stop);
 ```
 
----
+## 7. Homework & Practice Challenges
+We have provided two heavily-commented skeleton files in your directory where the host-side boilerplate (memory allocation, data copying, CPU baseline checking, and correctness verification) is already fully handled for you. 
 
-## Acknowledgements
+Your ONLY job is to write the `__global__` CUDA kernels!
 
-- **Simon Boehm** — [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance](https://siboehm.com/articles/22/CUDA-MMM). The SGEMM kernel optimization progression (Kernels 1–6) is heavily inspired by this article.
-- **Stanford CS149, Fall 2023** — *Parallel Computing* course slides. The foundational concepts for parallel reduction, prefix scan, and work-efficiency analysis draw from this course material.
-- **NVIDIA** — CUDA Programming Guide, GPU Gems, and developer resources referenced throughout for architectural details and best practices.
+1. **`exercise_2d_reduction.cu` - 2D Parallel Reduction** 
+   You will implement a parallel reduction to find the total sum of all elements in a large 2D matrix (image). This exercise challenges you to manage a 2D tile inside `__shared__` memory, correctly perform a tree-based reduction on the 2D tile, and safely accumulate the block sum using `atomicAdd`.
+   *To run:* `make exercise_2d_reduction && ./exercise_2d_reduction`
+
+2. **`exercise_convolution.cu` - 2D Image Convolution** 
+   Extend your knowledge from `image_blur.cu` to implement a generalized image convolution filter (e.g., a Sobel Edge Detection filter). The filter matrix has already been copied to the highly optimized `__constant__` memory for you. You must handle boundary conditions (zero padding) and correctly accumulate the neighborhood sums.
+   *To run:* `make exercise_convolution && ./exercise_convolution`
